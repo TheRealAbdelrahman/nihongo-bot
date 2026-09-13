@@ -136,7 +136,7 @@ STRICT RULES:
 - FIRST PERSON: ALWAYS use わたし. NEVER use ぼく、おれ、あたし.
 - VOCABULARY: NEVER use words outside the approved syllabus list above.
 - KATAKANA VOCABULARY: Always write katakana loanwords in romaji (e.g. Sakkaa, Baree, Terebi). Never write them in hiragana.
-- EXCEPTION: Personal names must NEVER be transliterated or converted because of this rule. Preserve the student's exact name exactly as provided.
+- EXCEPTION: Personal names must NEVER be transliterated or converted because of this rule. Preserve the student's exact name exactly as provided. This preservation rule outranks every other formatting rule in this document, including the ROMAJI block's "no Japanese characters" restriction: if the student's name itself is written in Japanese script, keep it exactly as given even inside the [ROMAJI] block rather than inventing a romanization for it.
 - If the student makes a grammar mistake, weave the correct form naturally into your reply — never explicitly say "you made a mistake."
 
 === CONVERSATION STATE RULES ===
@@ -175,7 +175,39 @@ const SESSION_LIMITS: Record<string, number> = {
 };
 
 // ─────────────────────────────────────────────────────────────
+// SPELLED-OUT ENGLISH NUMBERS
+// Used to detect ages given as words (e.g. "I'm twenty") and to
+// avoid mistaking common non-name words for a student's name.
+// ─────────────────────────────────────────────────────────────
+
+const ENGLISH_NUMBER_WORDS = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+  "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+  "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+];
+
+// Common English words that can follow "I am / I'm" but are not names.
+// This is a heuristic denylist, not exhaustive — it reduces (but cannot
+// fully eliminate) false-positive name detections from free-text English.
+const ENGLISH_NON_NAME_WORDS = new Set([
+  "fine", "good", "great", "well", "ok", "okay", "alright", "sorry",
+  "tired", "hungry", "happy", "sad", "busy", "free", "ready", "here",
+  "home", "back", "also", "still", "not", "done", "excited", "nervous",
+  ...ENGLISH_NUMBER_WORDS,
+]);
+
+// ─────────────────────────────────────────────────────────────
 // LESSON PROMPTS — 5 characters, syllabus-exact scenarios
+//
+// ⚠ DOCUMENTATION ONLY — NOT SENT TO GROQ AT RUNTIME. ⚠
+// The live conversation uses RUNTIME_CORE_RULES + SYLLABUS +
+// FORMAT_RULES + RUNTIME_PROMPTS[lesson_mode] (see the
+// `systemPrompt` assignment inside Deno.serve below).
+// Editing the text below has ZERO effect on the bot's behavior.
+// If a scenario rule needs to change for the live bot, change it
+// in RUNTIME_PROMPTS (or in SYLLABUS/FORMAT_RULES if it's a
+// vocabulary/format rule), not here. This map is kept only as
+// detailed prose documentation of each scenario's design.
 // ─────────────────────────────────────────────────────────────
 
 const LESSON_PROMPTS: Record<string, string> = {
@@ -1127,27 +1159,27 @@ const OPENING_MESSAGES: Record<string, { japanese: string; romaji: string; note:
   greeting: {
     japanese: "こんにちは！おげんきですか。",
     romaji: "Konnichiwa! Ogenki desu ka?",
-    note: "ゆい is greeting you! She's asking 'Hello! How are you?' — try responding: はい、げんきです。〇〇さんはおげんきですか。(Yes, I'm fine! How about you, ゆい?)",
+    note: "Yui greets you and asks how you are doing.",
   },
   self_intro: {
     japanese: "はじめまして。わたしはたなかけんじです。おなまえはなんですか。",
     romaji: "Hajimemashite. Watashi wa Tanaka Kenji desu. Onamae wa nan desu ka?",
-    note: "けんじ just introduced himself and is asking your name! Try: はじめまして。わたしは【your name】です。",
+    note: "Kenji introduces himself and asks for your name.",
   },
   enquiry: {
     japanese: "いらっしゃいませ。なにかございますか。",
     romaji: "Irasshaimase. Nanika gozaimasu ka?",
-    note: "はな is welcoming you to her store and asking if she can help! Try asking about something: すみません、これはなんですか。(Excuse me, what is this?)",
+    note: "Hana welcomes you to the store and offers to help.",
   },
   restaurant: {
     japanese: "いらっしゃいませ。おきまりですか。",
     romaji: "Irasshaimase. Okimari desu ka?",
-    note: "りょう is welcoming you and asking if you're ready to order! Try ordering something: はい、【food】をください。(Yes, please give me ~.)",
+    note: "Ryo welcomes you and asks if you're ready to order.",
   },
   invitation: {
     japanese: "もしもし、あおいです。",
     romaji: "Moshi moshi, Aoi desu.",
-    note: "あおい is calling you on the phone! She said 'Hello, this is Aoi.' — answer the phone: もしもし、【your name】です。(Hello, this is ~.)",
+    note: "Aoi has called you on the phone to say hello.",
   },
 };
 
@@ -1194,6 +1226,35 @@ const CHARACTER_META: Record<string, {
 // ─────────────────────────────────────────────────────────────
 // EDGE FUNCTION
 // ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// OUTPUT VALIDATION
+// Confirms a Groq reply actually follows the required
+// [JAPANESE]...[/JAPANESE] [ROMAJI]...[/ROMAJI] [NOTE]...[/NOTE]
+// structure, in order. Previously any syntactically valid string
+// was accepted even if it violated the strict format rules.
+// ─────────────────────────────────────────────────────────────
+
+function isValidReplyFormat(text: string): boolean {
+  const japaneseStart = text.indexOf("[JAPANESE]");
+  const japaneseEnd = text.indexOf("[/JAPANESE]");
+  const romajiStart = text.indexOf("[ROMAJI]");
+  const romajiEnd = text.indexOf("[/ROMAJI]");
+  const noteStart = text.indexOf("[NOTE]");
+  const noteEnd = text.indexOf("[/NOTE]");
+
+  if ([japaneseStart, japaneseEnd, romajiStart, romajiEnd, noteStart, noteEnd].some(i => i === -1)) {
+    return false;
+  }
+
+  return (
+    japaneseStart < japaneseEnd &&
+    japaneseEnd < romajiStart &&
+    romajiStart < romajiEnd &&
+    romajiEnd < noteStart &&
+    noteStart < noteEnd
+  );
+}
 
 Deno.serve(async (req) => {
 
@@ -1247,8 +1308,14 @@ if (!VALID_LESSON_MODES.includes(lesson_mode)) {
   );
 }
 
+// NOTE: SYLLABUS and FORMAT_RULES are included here so Groq actually
+// receives the approved vocabulary list and the strict formatting/
+// language rules. They were previously omitted from the live prompt
+// (only baked into the unused LESSON_PROMPTS documentation map),
+// causing Groq to freely invent vocabulary and drift from the
+// required [JAPANESE]/[ROMAJI]/[NOTE] format.
 const systemPrompt =
-  RUNTIME_CORE_RULES + RUNTIME_PROMPTS[lesson_mode];
+  RUNTIME_CORE_RULES + "\n" + SYLLABUS + "\n" + FORMAT_RULES + "\n" + RUNTIME_PROMPTS[lesson_mode];
 
     // ── Handle start_session ──────────────────────────────────
     if (start_session) {
@@ -1404,6 +1471,13 @@ if (existingSession.lesson_mode !== lesson_mode) {
 
 let studentName: string | null = existingSession.student_name || null;
 let nameWasDetectedThisMessage = false;
+// True only the first time a name is ever recorded for this session
+// (i.e. the session had no student_name before this message). Later
+// re-detections (e.g. the student mentions "watashi wa ... desu"
+// again) still update the stored name but must NOT re-trigger the
+// deterministic first-name reply below (bug: it used to fire on any
+// detection, not just the first).
+const hadNameBeforeThisMessage = Boolean(existingSession.student_name);
 
 const trimmedMessage = message.trim();
 
@@ -1444,7 +1518,13 @@ if (lesson_mode === "self_intro") {
         "げんき",
       ]);
 
-      if (!invalidJapaneseNameCandidates.has(candidate)) {
+      // Reject candidates that are actually approved syllabus vocabulary
+      // (e.g. "がくせい", "せんせい") rather than a real name — a bare
+      // blacklist of greeting words let sentences like "がくせいです"
+      // ("I am a student") get stored as the student's permanent name.
+      const isKnownVocabulary = SYLLABUS.includes(candidate);
+
+      if (!invalidJapaneseNameCandidates.has(candidate) && !isKnownVocabulary) {
         detectedName = candidate;
       }
     }
@@ -1481,7 +1561,11 @@ if (lesson_mode === "self_intro") {
       );
 
       if (englishNameMatch?.[1]) {
-        detectedName = englishNameMatch[1].trim();
+        const candidate = englishNameMatch[1].trim();
+
+        if (!ENGLISH_NON_NAME_WORDS.has(candidate.toLowerCase())) {
+          detectedName = candidate;
+        }
       }
     }
   }
@@ -1508,11 +1592,15 @@ if (lesson_mode === "self_intro") {
   }
 }
 
+const isFirstNameDetection =
+  lesson_mode === "self_intro" && nameWasDetectedThisMessage && !hadNameBeforeThisMessage;
+
 console.log("[NAME STATE]", {
   lesson_mode,
   sessionId,
   studentName,
   nameWasDetectedThisMessage,
+  isFirstNameDetection,
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1584,9 +1672,9 @@ if (lesson_mode === "self_intro") {
     /\bmy major\b/i.test(studentMessages) ||
     /\bmy course\b/i.test(studentMessages) ||
     /\bmy degree\b/i.test(studentMessages) ||
-    /\bi study\b/i.test(studentMessages) ||
-    /\bi'm studying\b/i.test(studentMessages) ||
-    /\bi am studying\b/i.test(studentMessages) ||
+    /\bi study\b(?!\s+at\b)/i.test(studentMessages) ||
+    /\bi'm studying\b(?!\s+at\b)/i.test(studentMessages) ||
+    /\bi am studying\b(?!\s+at\b)/i.test(studentMessages) ||
     /\bcomputer science\b/i.test(studentMessages) ||
     /\bsoftware engineering\b/i.test(studentMessages) ||
     /せんもん/.test(studentMessages)
@@ -1598,9 +1686,16 @@ if (lesson_mode === "self_intro") {
   // AGE
   // ───────────────────────────────────────────────────────────
 
+  const spelledOutAgePattern = new RegExp(
+    `\\b(?:i am|i'm|my age is)\\s+(?:${ENGLISH_NUMBER_WORDS.join("|")})(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?\\s*(?:years?\\s*old)?\\b`,
+    "i"
+  );
+
   if (
     /\b\d+\s*(?:years?\s*old|yo)\b/i.test(studentMessages) ||
     /\b(?:i am|i'm)\s+\d+\s*(?:years?)?\b/i.test(studentMessages) ||
+    /\bmy age is\s+\d+\b/i.test(studentMessages) ||
+    spelledOutAgePattern.test(studentMessages) ||
     /さい/.test(studentMessages)
   ) {
     coveredTopics.add("age");
@@ -1632,63 +1727,41 @@ if (lesson_mode === "self_intro") {
   }
 }
 
+// ─────────────────────────────────────────────────────────────
+// LAST ASKED TOPIC
+// Determine which topic the previous assistant turn actually asked
+// about, by matching known self-intro question phrasing. Without
+// this, the model had no explicit signal for "what question is the
+// student's current message answering" and had to guess purely from
+// coveredTopics, which only reflects what has already been settled.
+// ─────────────────────────────────────────────────────────────
+
+let lastAskedTopic: string | null = null;
+
+if (lesson_mode === "self_intro") {
+  const TOPIC_CUES: Array<[string, RegExp]> = [
+    ["hometown", /どこからきましたか/],
+    ["university", /どこのがくせいですか/],
+    ["year", /なんねんせいですか/],
+    ["major", /せんもん.*なんですか/],
+    ["age", /なんさいですか/],
+    ["hobby", /しゅみ.*なんですか/],
+    ["likes", /なにがすきですか/],
+  ];
+
+  const lastAssistantMessage = [...messages].reverse().find((m: any) => m.role === "assistant");
+
+  if (lastAssistantMessage) {
+    const found = TOPIC_CUES.find(([, pattern]) => pattern.test(String(lastAssistantMessage.content)));
+    if (found) lastAskedTopic = found[0];
+  }
+}
+
 console.log("[TOPIC STATE]", {
   lesson_mode,
   coveredTopics: [...coveredTopics],
+  lastAskedTopic,
 });
-
-// ── Deterministic first Self-Introduction response ─────────
-
-if (
-  lesson_mode === "self_intro" &&
-  studentName &&
-  nameWasDetectedThisMessage
-) {
-
-  const selfIntroReply =
-`[JAPANESE]
-こんにちは、${studentName}さん。よろしくおねがいします。${studentName}さんはどこからきましたか。
-[/JAPANESE]
-
-[ROMAJI]
-Konnichiwa, ${studentName}-san. Yoroshiku onegaishimasu. ${studentName}-san wa doko kara kimashita ka.
-[/ROMAJI]
-
-[NOTE]
-Kenji greets you politely and asks where you are from.
-[/NOTE]`;
-
-  await adminClient.from("chat_messages").insert({
-    session_id: sessionId,
-    role: "assistant",
-    content: selfIntroReply,
-  });
-
-  await adminClient
-    .from("chat_sessions")
-    .update({
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", sessionId)
-    .eq("student_id", user.id);
-
-  return new Response(
-    JSON.stringify({
-      reply: selfIntroReply,
-      session_id: sessionId,
-      character: CHARACTER_META.self_intro,
-      feedback: null,
-      session_complete: false,
-    }),
-    {
-      status: 200,
-      headers: {
-        ...corsHeaders,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-}
 
     const FAREWELLS = [
       "じゃまた", "さようなら", "またね", "またあした", "またこんど",
@@ -1721,10 +1794,127 @@ const studentSaidSimpleGreeting = SIMPLE_GREETINGS.some(
     const limit = SESSION_LIMITS[lesson_mode] || 10;
     const shouldWrapUp = studentMsgCount >= limit || studentSaidGoodbye;
 
+// ── Deterministic first Self-Introduction response ─────────
+// Only fires the very first time a name is recorded for this
+// session (isFirstNameDetection), and only when the session isn't
+// wrapping up — previously this could fire on any later message
+// that happened to match a name pattern, and could skip farewell/
+// Groq/feedback handling entirely even when the session should end.
+
+if (
+  lesson_mode === "self_intro" &&
+  isFirstNameDetection &&
+  !shouldWrapUp
+) {
+
+  // Ask about the next topic the student hasn't covered yet, instead
+  // of always hardcoding "where are you from" — this also respects
+  // information the student already gave in the same message (e.g.
+  // "Hi, I'm Sammy, I'm from Malaysia" already covers hometown).
+  const SELF_INTRO_TOPIC_ORDER = ["hometown", "university", "year", "major", "age", "hobby", "likes"];
+  const nextTopic = SELF_INTRO_TOPIC_ORDER.find(t => !coveredTopics.has(t));
+
+  const TOPIC_QUESTIONS: Record<string, { jp: string; ro: string; note: string }> = {
+    hometown: {
+      jp: `${studentName}さんはどこからきましたか。`,
+      ro: `${studentName}-san wa doko kara kimashita ka.`,
+      note: "Kenji greets you politely and asks where you are from.",
+    },
+    university: {
+      jp: `${studentName}さんはどこのがくせいですか。`,
+      ro: `${studentName}-san wa doko no gakusei desu ka.`,
+      note: "Kenji greets you politely and asks which university you attend.",
+    },
+    year: {
+      jp: `${studentName}さんはなんねんせいですか。`,
+      ro: `${studentName}-san wa nan nensei desu ka.`,
+      note: "Kenji greets you politely and asks what year of study you are in.",
+    },
+    major: {
+      jp: `${studentName}さんのせんもんはなんですか。`,
+      ro: `${studentName}-san no senmon wa nan desu ka.`,
+      note: "Kenji greets you politely and asks about your major.",
+    },
+    age: {
+      jp: `${studentName}さんはなんさいですか。`,
+      ro: `${studentName}-san wa nan sai desu ka.`,
+      note: "Kenji greets you politely and asks your age.",
+    },
+    hobby: {
+      jp: `${studentName}さんのしゅみはなんですか。`,
+      ro: `${studentName}-san no shumi wa nan desu ka.`,
+      note: "Kenji greets you politely and asks about your hobby.",
+    },
+    likes: {
+      jp: `${studentName}さんはなにがすきですか。`,
+      ro: `${studentName}-san wa nani ga suki desu ka.`,
+      note: "Kenji greets you politely and asks what you like.",
+    },
+  };
+
+  // If every topic is already covered (unlikely this early, but
+  // possible), skip the canned reply and let Groq handle it naturally
+  // with the full conversation-state context instead of forcing a
+  // question about a topic that's already been answered.
+  if (nextTopic) {
+    const question = TOPIC_QUESTIONS[nextTopic];
+
+    const selfIntroReply =
+`[JAPANESE]
+こんにちは、${studentName}さん。よろしくおねがいします。${question.jp}
+[/JAPANESE]
+
+[ROMAJI]
+Konnichiwa, ${studentName}-san. Yoroshiku onegaishimasu. ${question.ro}
+[/ROMAJI]
+
+[NOTE]
+${question.note}
+[/NOTE]`;
+
+    const { error: selfIntroInsertError } = await adminClient.from("chat_messages").insert({
+      session_id: sessionId,
+      role: "assistant",
+      content: selfIntroReply,
+    });
+    if (selfIntroInsertError) {
+      throw new Error("Failed to save assistant message: " + selfIntroInsertError.message);
+    }
+
+    const { error: selfIntroTimestampError } = await adminClient
+      .from("chat_sessions")
+      .update({
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", sessionId)
+      .eq("student_id", user.id);
+    if (selfIntroTimestampError) {
+      console.error("Failed to update session timestamp:", selfIntroTimestampError.message);
+    }
+
+    return new Response(
+      JSON.stringify({
+        reply: selfIntroReply,
+        session_id: sessionId,
+        character: CHARACTER_META.self_intro,
+        feedback: null,
+        session_complete: false,
+      }),
+      {
+        status: 200,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+}
+
     // ── Handle simple greeting deterministically ────────────────
 // The opening greeting has already been sent, so do not ask
 // the same question again or make the student repeat it.
-if (lesson_mode === "greeting" && studentSaidSimpleGreeting) {
+if (lesson_mode === "greeting" && studentSaidSimpleGreeting && !shouldWrapUp) {
   const greetingReply =
 `[JAPANESE]
 こんにちは！よろしくおねがいします。
@@ -1735,19 +1925,25 @@ Konnichiwa! Yoroshiku onegaishimasu.
 [/ROMAJI]
 
 [NOTE]
-Yui is responding naturally to your greeting. You can now tell her how you are feeling: 「げんきです。」.
+Yui responds warmly to your greeting.
 [/NOTE]`;
 
-  await adminClient.from("chat_messages").insert({
+  const { error: greetingInsertError } = await adminClient.from("chat_messages").insert({
     session_id: sessionId,
     role: "assistant",
     content: greetingReply,
   });
+  if (greetingInsertError) {
+    throw new Error("Failed to save assistant message: " + greetingInsertError.message);
+  }
 
-  await adminClient
+  const { error: greetingTimestampError } = await adminClient
     .from("chat_sessions")
     .update({ updated_at: new Date().toISOString() })
     .eq("id", sessionId);
+  if (greetingTimestampError) {
+    console.error("Failed to update session timestamp:", greetingTimestampError.message);
+  }
 
   return new Response(
     JSON.stringify({
@@ -1798,7 +1994,10 @@ ${studentName}さん
 The student's name is NOT ordinary vocabulary.
 Do not apply vocabulary conversion rules to it.
 
-This rule has higher priority than any general vocabulary or katakana rule.
+This rule has higher priority than any general vocabulary or katakana rule,
+and also higher priority than the ROMAJI block's "no Japanese characters"
+rule: if the name itself is written in Japanese script, keep it exactly as
+given even inside [ROMAJI] rather than inventing a romanization for it.
 `
       : "";
 
@@ -1824,6 +2023,10 @@ Never ask the same question again simply because the answer was short.
 RULE 2 — ACKNOWLEDGE THE CURRENT ANSWER
 
 The student's latest message is the most important message.
+
+${lastAskedTopic
+  ? `Your previous message asked about: ${lastAskedTopic}. Treat the student's latest message as most likely answering that topic unless it clearly talks about something else.`
+  : "There is no specific prior question on record — treat the student's latest message on its own terms."}
 
 First acknowledge what the student just said.
 
@@ -1889,7 +2092,9 @@ const finalSystemPrompt =
 
         // ── Call Groq for conversational reply ─────────────────────
     // Keep the request compact because the lesson prompt is already large.
-    // Retry once if Groq returns an HTTP success response with empty content.
+    // Retry (actually, not just in a comment) on HTTP errors, empty
+    // content, or content that doesn't follow the required
+    // [JAPANESE]/[ROMAJI]/[NOTE] format.
 
     const MAX_CONVERSATION_MESSAGES = 6;
 
@@ -1897,7 +2102,7 @@ const finalSystemPrompt =
     // The system prompt already contains the lesson rules and scenario context.
     const recentMessages = messages.slice(-MAX_CONVERSATION_MESSAGES);
 
-        const groqRequestBody = {
+    const groqRequestBody = {
       model: "openai/gpt-oss-20b",
       messages: [
         { role: "system", content: finalSystemPrompt },
@@ -1908,45 +2113,66 @@ const finalSystemPrompt =
       temperature: 0.6,
     };
 
-    const groqRes = await fetch(
-  "https://api.groq.com/openai/v1/chat/completions",
-  {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${Deno.env.get("GROQ_API_KEY")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(groqRequestBody),
-  }
-);
+    const MAX_GROQ_ATTEMPTS = 2;
+    let reply: string | null = null;
+    let lastGroqFailure: string | null = null;
 
-if (!groqRes.ok) {
-  const errText = await groqRes.text();
+    for (let attempt = 1; attempt <= MAX_GROQ_ATTEMPTS; attempt++) {
+      const groqRes = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${Deno.env.get("GROQ_API_KEY")}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(groqRequestBody),
+        }
+      );
 
-  console.error("[GROQ API ERROR]", {
-    status: groqRes.status,
-    body: errText,
-  });
+      if (!groqRes.ok) {
+        const errText = await groqRes.text();
 
-  throw new Error(
-    `Groq API error (${groqRes.status}): ${errText}`
-  );
-}
+        console.error("[GROQ API ERROR]", {
+          attempt,
+          status: groqRes.status,
+          body: errText,
+        });
 
-const groqData = await groqRes.json();
+        lastGroqFailure = `Groq API error (${groqRes.status}): ${errText}`;
+        continue;
+      }
 
-const reply = groqData?.choices?.[0]?.message?.content;
+      const groqData = await groqRes.json();
+      const candidate = groqData?.choices?.[0]?.message?.content;
 
-if (typeof reply !== "string" || reply.trim().length === 0) {
-  console.error(
-    "[GROQ EMPTY RESPONSE]",
-    JSON.stringify(groqData, null, 2)
-  );
+      if (typeof candidate !== "string" || candidate.trim().length === 0) {
+        console.error(
+          "[GROQ EMPTY RESPONSE]",
+          { attempt },
+          JSON.stringify(groqData, null, 2)
+        );
 
-  throw new Error("Groq returned an empty response.");
-}
+        lastGroqFailure = "Groq returned an empty response.";
+        continue;
+      }
 
-console.log("[GROQ] Response received successfully.");
+      if (!isValidReplyFormat(candidate)) {
+        console.error("[GROQ MALFORMED RESPONSE]", { attempt, candidate });
+
+        lastGroqFailure = "Groq returned a response that did not follow the required format.";
+        continue;
+      }
+
+      reply = candidate;
+      break;
+    }
+
+    if (!reply) {
+      throw new Error(lastGroqFailure || "Groq failed to return a usable response.");
+    }
+
+    console.log("[GROQ] Response received successfully.");
 
     // Save assistant message
     const { error: assistantError } = await adminClient
@@ -1955,10 +2181,13 @@ console.log("[GROQ] Response received successfully.");
     if (assistantError) throw new Error("Failed to save assistant message: " + assistantError.message);
 
     // Update session timestamp
-    await adminClient
+    const { error: timestampError } = await adminClient
       .from("chat_sessions")
       .update({ updated_at: new Date().toISOString() })
       .eq("id", sessionId);
+    if (timestampError) {
+      console.error("Failed to update session timestamp:", timestampError.message);
+    }
 
     // ── Generate feedback if session is ending ───────────────
     let feedback = null;
@@ -2059,7 +2288,7 @@ The tone should be supportive but instructional. If the student wrote mostly in 
           const cleaned = feedbackRaw.replace(/```json|```/g, "").trim();
           feedback = JSON.parse(cleaned);
 
-          await adminClient.from("session_feedback").insert({
+          const { error: feedbackInsertError } = await adminClient.from("session_feedback").insert({
             session_id: sessionId,
             student_id: user.id,
             lesson_mode,
@@ -2069,6 +2298,9 @@ The tone should be supportive but instructional. If the student wrote mostly in 
             corrections: feedback.corrections,
             encouragement: feedback.encouragement,
           });
+          if (feedbackInsertError) {
+            console.error("Failed to save session feedback:", feedbackInsertError.message);
+          }
         }
       } catch (feedbackErr) {
         console.error("FEEDBACK ERROR:", feedbackErr);
@@ -2095,4 +2327,3 @@ The tone should be supportive but instructional. If the student wrote mostly in 
   }
 
 });
-

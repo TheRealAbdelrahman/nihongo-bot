@@ -434,10 +434,17 @@ export default function ChatPage() {
     try {
       dbg("sendMsg:invoke", { sessionId, lesson_mode: lessonMode });
 
-      const res = await Promise.race([
-        supabase.functions.invoke("chat", {
-          body: { message: text, lesson_mode: lessonMode, session_id: sessionId },
-        }),
+     const res = await Promise.race([
+  supabase.functions.invoke("chat", {
+    body: {
+      message: text,
+      lesson_mode: lessonMode,
+      session_id: sessionId,
+    },
+    headers: {
+      Authorization: `Bearer ${authSession?.access_token}`,
+    },
+  }),
         new Promise((_, reject) => {
           timeoutRef.current = setTimeout(() => {
             dbg("sendMsg:timeout", { after: "10s" });
