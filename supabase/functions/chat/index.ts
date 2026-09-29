@@ -17,8 +17,9 @@ const corsHeaders = {
 
 const GROQ_MODEL = "openai/gpt-oss-120b";
 
-const MAX_CONVERSATION_MESSAGES = 6;
+const MAX_CONVERSATION_MESSAGES = 4;
 const MAX_GROQ_COMPLETION_TOKENS = 384;
+const ENABLE_BACKGROUND_FEEDBACK = false;
 const GROQ_TIMEOUT_MS = 8000;
 
 const MAX_FEEDBACK_COMPLETION_TOKENS = 256;
@@ -276,7 +277,7 @@ CHARACTER:
 You are やまだ ゆい, a friendly university student.
 
 SCENARIO:
-Greetings and health only.
+Greetings and health are the primary scenario.
 
 ALLOWED:
 - greetings
@@ -287,18 +288,30 @@ ALLOWED:
 - おだいじに
 - ありがとうございます
 - ひさしぶり
+- a brief simple question about Yui when the student directly asks one
 
 The opening message was already sent:
 こんにちは！おげんきですか。
 
 Never repeat the opening.
 
-If the student says they are well, acknowledge it and conclude naturally.
+If the student says they are well, acknowledge it.
 
 If the student says they are not well, respond sympathetically.
 
+If the student asks a simple direct question about Yui, answer that
+question briefly before continuing or concluding the greeting scenario.
+
+For example, if the student says:
+"I am fine. What's your name?"
+
+acknowledge that the student is fine and answer Yui's name.
+
+Do not start a full self-introduction unless the student specifically
+asks for information about Yui.
+
 Do not introduce school, hobbies, food, family, work, studying, location,
-or other self-introduction topics.
+or other unrelated topics.
 `,
 
   self_intro: `
@@ -702,7 +715,7 @@ function detectLastAskedTopic(
     ["hometown", /どこからきましたか/],
     [
       "university",
-      /(?:どこのがくせいですか|どこのだいがくにいっていますか)/,
+      /(?:どこのがくせいですか|どこのだいがくにいっていますか|だいがくはどこですか)/,
     ],
     ["year", /なんねんせいですか/],
     ["major", /せんもん.*なんですか/],
@@ -863,7 +876,10 @@ function prepareHistoryForGroq(
 ): Array<{ role: string; content: string }> {
   return messages.map((message) => {
     if (message.role !== "assistant") {
-      return message;
+      return {
+        role: message.role,
+        content: String(message.content).trim(),
+      };
     }
 
     const content = String(message.content);
@@ -872,32 +888,16 @@ function prepareHistoryForGroq(
       /\[JAPANESE\]\s*([\s\S]*?)\s*\[\/JAPANESE\]/i,
     );
 
-    const romajiMatch = content.match(
-      /\[ROMAJI\]\s*([\s\S]*?)\s*\[\/ROMAJI\]/i,
-    );
-
-    const noteMatch = content.match(
-      /\[NOTE\]\s*([\s\S]*?)\s*\[\/NOTE\]/i,
-    );
-
-    if (
-      !japaneseMatch ||
-      !romajiMatch ||
-      !noteMatch
-    ) {
-      return message;
+    if (japaneseMatch?.[1]) {
+      return {
+        role: "assistant",
+        content: japaneseMatch[1].trim(),
+      };
     }
 
     return {
       role: "assistant",
-      content: JSON.stringify({
-        japanese:
-          japaneseMatch[1].trim(),
-        romaji:
-          romajiMatch[1].trim(),
-        note:
-          noteMatch[1].trim(),
-      }),
+      content: content.trim(),
     };
   });
 }
@@ -2116,6 +2116,14 @@ Never invent a different name.
 
 You may append さん.
 
+If the exact student name contains Kanji, do not invent a hiragana,
+katakana, or Romaji reading for the name.
+
+Because Japanese dialogue must contain no Kanji, do not address the
+student by name in Japanese dialogue when the exact name contains Kanji.
+
+Never replace the student's name with a different name.
+
 The student's name is personal data and is exempt from
 ordinary vocabulary conversion rules.
 `
@@ -2232,6 +2240,28 @@ ${SYLLABUS}
 
 Respond to the student's CURRENT message.
 
+=== CURRENT MESSAGE PRIORITY ===
+
+Read the student's entire latest message before deciding what to say.
+
+If the latest message contains multiple meaningful parts, handle all
+relevant parts that can be answered within the assigned lesson.
+
+Do not ignore a question because the same message also contains an
+answer to the previous question.
+
+For example, if the student says:
+"I am fine. What's your name?"
+
+acknowledge that the student is fine AND answer the question about
+the character's name.
+
+Never respond only to the first sentence when the latest message
+contains a relevant question.
+
+The latest student message has priority over the previous
+conversation flow.
+
 Never assume what the student will say.
 
 Stay inside the assigned lesson scenario.
@@ -2303,8 +2333,6 @@ The JSON must contain exactly:
 Do not include Markdown.
 Do not include response-format tags.
 Do not include additional fields.
-
-The server will add the response-format tags.
 `;
 
     console.log(
@@ -2623,7 +2651,10 @@ The server will add the response-format tags.
     // BACKGROUND FEEDBACK
     // ─────────────────────────────────────────────────────────
 
-    if (shouldWrapUp) {
+    if (
+      shouldWrapUp &&
+      ENABLE_BACKGROUND_FEEDBACK
+    ) {
       const feedbackPromise =
         generateAndSaveFeedback(
           {
